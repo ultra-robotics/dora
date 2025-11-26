@@ -4,6 +4,7 @@ use std::env::current_dir;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Mutex;
 
 use arrow::pyarrow::{FromPyArrow, ToPyArrow};
 use dora_download::download_file;
@@ -100,8 +101,8 @@ def basicConfig(*pargs, **kwargs):
 #[pyclass]
 #[derive(Dir, Dict, Str, Repr)]
 pub struct Node {
-    events: Events,
-    node: DelayedCleanup<DoraNode>,
+    events: Arc<Mutex<Events>>,
+    node: Arc<Mutex<DelayedCleanup<DoraNode>>>,
 
     dataflow_id: DataflowId,
     node_id: NodeId,
@@ -122,7 +123,6 @@ impl Node {
         let dataflow_id = *node.dataflow_id();
         let node_id = node.id().clone();
         let node = DelayedCleanup::new(node);
-        let events = events;
         let cleanup_handle = NodeCleanupHandle {
             _handles: Arc::new(node.handle()),
         };
@@ -133,13 +133,13 @@ impl Node {
         })?;
 
         Ok(Node {
-            events: Events {
+            events: Arc::new(Mutex::new(Events {
                 inner: EventsInner::Dora(events),
                 _cleanup_handle: cleanup_handle,
-            },
+            })),
             dataflow_id,
             node_id,
-            node,
+            node: Arc::new(Mutex::new(node)),
         })
     }
 
@@ -166,8 +166,14 @@ impl Node {
     /// :rtype: dict
     #[pyo3(signature = (timeout=None))]
     #[allow(clippy::should_implement_trait)]
-    pub fn next(&mut self, py: Python, timeout: Option<f32>) -> PyResult<Option<Py<PyDict>>> {
-        let event = py.allow_threads(|| self.events.recv(timeout.map(Duration::from_secs_f32)));
+    pub fn next(&self, py: Python, timeout: Option<f32>) -> PyResult<Option<Py<PyDict>>> {
+        let event = py.allow_threads(|| {
+            let rt = get_tokio_handle();
+            rt.block_on(async {
+                let mut events_guard = self.events.lock().await;
+                events_guard.recv(timeout.map(Duration::from_secs_f32))
+            })
+        });
         if let Some(event) = event {
             let dict = event
                 .to_py_dict(py)
@@ -179,10 +185,13 @@ impl Node {
     }
 
     #[allow(clippy::should_implement_trait)]
-    pub fn drain(&mut self, py: Python) -> PyResult<Vec<Py<PyDict>>> {
-        let events = self
-            .events
-            .drain()
+    pub fn drain(&self, py: Python) -> PyResult<Vec<Py<PyDict>>> {
+        let rt = get_tokio_handle();
+        let drained_events = rt.block_on(async {
+            let mut events_guard = self.events.lock().await;
+            events_guard.drain()
+        });
+        let events = drained_events
             .context("Could not drain events. Channel is closed")?
             .into_iter()
             .map(|event| {
@@ -214,11 +223,13 @@ impl Node {
     /// :rtype: dict
     #[pyo3(signature = (timeout=None))]
     #[allow(clippy::should_implement_trait)]
-    pub async fn recv_async(&mut self, timeout: Option<f32>) -> PyResult<Option<Py<PyDict>>> {
-        let event = self
-            .events
-            .recv_async_timeout(timeout.map(Duration::from_secs_f32))
-            .await;
+    pub async fn recv_async(&self, timeout: Option<f32>) -> PyResult<Option<Py<PyDict>>> {
+        let event = {
+            let mut events_guard = self.events.lock().await;
+            events_guard
+                .recv_async_timeout(timeout.map(Duration::from_secs_f32))
+                .await
+        };
         if let Some(event) = event {
             // Get python
             Python::with_gil(|py| {
@@ -245,7 +256,7 @@ impl Node {
     /// Default behaviour is to timeout after 2 seconds.
     ///
     /// :rtype: dict
-    pub fn __next__(&mut self, py: Python) -> PyResult<Option<Py<PyDict>>> {
+    pub fn __next__(&self, py: Python) -> PyResult<Option<Py<PyDict>>> {
         self.next(py, None)
     }
 
@@ -285,26 +296,33 @@ impl Node {
     /// :rtype: None
     #[pyo3(signature = (output_id, data, metadata=None))]
     pub fn send_output(
-        &mut self,
+        &self,
         output_id: String,
         data: PyObject,
         metadata: Option<Bound<'_, PyDict>>,
         py: Python,
     ) -> eyre::Result<()> {
         let parameters = pydict_to_metadata(metadata)?;
+        let rt = get_tokio_handle();
 
         if let Ok(py_bytes) = data.downcast_bound::<PyBytes>(py) {
             let data = py_bytes.as_bytes();
-            self.node
-                .get_mut()
-                .send_output_bytes(output_id.into(), parameters, data.len(), data)
-                .wrap_err("failed to send output")?;
+            rt.block_on(async {
+                let mut node_guard = self.node.lock().await;
+                node_guard
+                    .get_mut()
+                    .send_output_bytes(output_id.into(), parameters, data.len(), data)
+                    .wrap_err("failed to send output")
+            })?;
         } else if let Ok(arrow_array) = arrow::array::ArrayData::from_pyarrow_bound(data.bind(py)) {
-            self.node.get_mut().send_output(
-                output_id.into(),
-                parameters,
-                arrow::array::make_array(arrow_array),
-            )?;
+            rt.block_on(async {
+                let mut node_guard = self.node.lock().await;
+                node_guard.get_mut().send_output(
+                    output_id.into(),
+                    parameters,
+                    arrow::array::make_array(arrow_array),
+                )
+            })?;
         } else {
             eyre::bail!("invalid `data` type, must by `PyBytes` or arrow array")
         }
@@ -317,18 +335,25 @@ impl Node {
     /// This method returns the parsed dataflow YAML file.
     ///
     /// :rtype: dict
-    pub fn dataflow_descriptor(&mut self, py: Python) -> eyre::Result<PyObject> {
-        Ok(
-            pythonize::pythonize(py, &self.node.get_mut().dataflow_descriptor()?)
-                .map(|x| x.unbind())?,
-        )
+    pub fn dataflow_descriptor(&self, py: Python) -> eyre::Result<PyObject> {
+        let rt = get_tokio_handle();
+        let descriptor = rt.block_on(async {
+            let mut node_guard = self.node.lock().await;
+            node_guard.get_mut().dataflow_descriptor().map(|d| d.clone())
+        })?;
+        Ok(pythonize::pythonize(py, &descriptor).map(|x| x.unbind())?)
     }
 
     /// Returns the node configuration.
     ///
     /// :rtype: dict
-    pub fn node_config(&mut self, py: Python) -> eyre::Result<PyObject> {
-        Ok(pythonize::pythonize(py, &self.node.get_mut().node_config()).map(|x| x.unbind())?)
+    pub fn node_config(&self, py: Python) -> eyre::Result<PyObject> {
+        let rt = get_tokio_handle();
+        let config = rt.block_on(async {
+            let mut node_guard = self.node.lock().await;
+            node_guard.get_mut().node_config().clone()
+        });
+        Ok(pythonize::pythonize(py, &config).map(|x| x.unbind())?)
     }
 
     /// Returns the dataflow id.
@@ -364,13 +389,17 @@ impl Node {
             s.poll_next_unpin(cx)
         });
 
-        // take out the event stream and temporarily replace it with a dummy
-        let events = std::mem::replace(
-            &mut self.events.inner,
-            EventsInner::Merged(Box::new(futures::stream::empty())),
-        );
-        // update self.events with the merged stream
-        self.events.inner = EventsInner::Merged(events.merge_external_send(Box::pin(stream)));
+        let rt = get_tokio_handle();
+        rt.block_on(async {
+            let mut events_guard = self.events.lock().await;
+            // take out the event stream and temporarily replace it with a dummy
+            let events_inner = std::mem::replace(
+                &mut events_guard.inner,
+                EventsInner::Merged(Box::new(futures::stream::empty())),
+            );
+            // update events with the merged stream
+            events_guard.inner = EventsInner::Merged(events_inner.merge_external_send(Box::pin(stream)));
+        });
 
         Ok(())
     }
@@ -382,6 +411,15 @@ fn err_to_pyany(err: eyre::Report, gil: Python<'_>) -> Py<PyAny> {
         .unwrap_or_else(|infallible| match infallible {})
         .into_any()
         .unbind()
+}
+
+fn get_tokio_handle() -> tokio::runtime::Handle {
+    tokio::runtime::Handle::try_current().unwrap_or_else(|_| {
+        tokio::runtime::Runtime::new()
+            .expect("Failed to create tokio runtime")
+            .handle()
+            .clone()
+    })
 }
 
 struct Events {
