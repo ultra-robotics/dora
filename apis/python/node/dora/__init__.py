@@ -108,7 +108,6 @@ if _HAS_SEPARATE_API:
         # Delegate node-specific methods to the underlying node
         def send_output(self, output_id, data, metadata=None):
             """Send output from the node."""
-            print("Sending output from the node.")
             return self._node.send_output(output_id, data, metadata)
         
         def dataflow_descriptor(self):

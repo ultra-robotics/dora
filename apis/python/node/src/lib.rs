@@ -2,7 +2,7 @@
 
 use std::env::current_dir;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::Duration;
 
 use arrow::pyarrow::{FromPyArrow, ToPyArrow};
@@ -234,7 +234,7 @@ fn err_to_pyany(err: eyre::Report, gil: Python<'_>) -> Py<PyAny> {
 #[pyclass]
 #[derive(Dir, Dict, Str, Repr)]
 pub struct Events {
-    inner: Arc<Mutex<EventsInner>>,
+    inner: EventsInner,
     _cleanup_handle: NodeCleanupHandle,
 }
 
@@ -246,7 +246,7 @@ impl Events {
     /// :type subscription: dora.Ros2Subscription
     /// :rtype: None
     pub fn merge_external_events(
-        &self,
+        &mut self,
         subscription: &mut Ros2Subscription,
         _py: Python,
     ) -> eyre::Result<()> {
@@ -383,9 +383,8 @@ impl Events {
 }
 
 impl Events {
-    fn recv(&self, timeout: Option<Duration>) -> Option<PyEvent> {
-        let mut inner = self.inner.lock().unwrap();
-        let event = match &mut *inner {
+    fn recv(&mut self, timeout: Option<Duration>) -> Option<PyEvent> {
+        let event = match &mut self.inner {
             EventsInner::Dora(events) => match timeout {
                 Some(timeout) => events.recv_timeout(timeout).map(MergedEvent::Dora),
                 None => events.recv().map(MergedEvent::Dora),
@@ -395,36 +394,19 @@ impl Events {
         event.map(|event| PyEvent { event })
     }
 
-    async fn recv_async_timeout(&self, timeout: Option<Duration>) -> Option<PyEvent> {
-        // We can't hold a std::sync::Mutex lock across await points
-        // So we need to check the type, release the lock, then work with it
-        // This is a limitation - we'll need to restructure for proper async support
-        // For now, we'll use a blocking approach wrapped in spawn_blocking
-        let inner_arc = self.inner.clone();
-        let timeout_clone = timeout;
-        tokio::task::spawn_blocking(move || {
-            let mut inner = inner_arc.lock().unwrap();
-            match &mut *inner {
-                EventsInner::Dora(events) => match timeout_clone {
-                    Some(timeout) => events.recv_timeout(timeout).map(MergedEvent::Dora),
-                    None => events.recv().map(MergedEvent::Dora),
-                },
-                EventsInner::Merged(_events) => {
-                    // For merged events, we'd need async support
-                    // This is a limitation of the current implementation
-                    None
-                }
-            }
-        })
-        .await
-        .ok()
-        .flatten()
-        .map(|event| PyEvent { event })
+    async fn recv_async_timeout(&mut self, timeout: Option<Duration>) -> Option<PyEvent> {
+        let event = match &mut self.inner {
+            EventsInner::Dora(events) => match timeout {
+                Some(timeout) => events.recv_async_timeout(timeout).await.map(MergedEvent::Dora),
+                None => events.recv_async().await.map(MergedEvent::Dora),
+            },
+            EventsInner::Merged(events) => events.next().await,
+        };
+        event.map(|event| PyEvent { event })
     }
 
-    fn drain_internal(&self) -> Option<Vec<PyEvent>> {
-        let mut inner = self.inner.lock().unwrap();
-        match &mut *inner {
+    fn drain_internal(&mut self) -> Option<Vec<PyEvent>> {
+        match &mut self.inner {
             EventsInner::Dora(events) => match events.drain() {
                 Some(items) => {
                     return Some(
@@ -444,14 +426,14 @@ impl Events {
     }
 
     pub fn merge_external_send_internal(
-        &self,
+        &mut self,
         external_events: impl Stream<Item = PyObject> + Unpin + Send + Sync + 'static,
     ) {
         let events = std::mem::replace(
-            &mut *self.inner.lock().unwrap(),
+            &mut self.inner,
             EventsInner::Merged(Box::new(futures::stream::empty())),
         );
-        *self.inner.lock().unwrap() = EventsInner::Merged(events.merge_external_send(Box::pin(external_events)));
+        self.inner = EventsInner::Merged(events.merge_external_send(Box::pin(external_events)));
     }
 }
 
@@ -490,11 +472,10 @@ pub fn init_node(node_id: Option<String>, py: Python) -> PyResult<(Py<Node>, Py<
     // Extend the `logging` module to interact with tracing
     setup_logging(py, node_id.clone(), dataflow_id)?;
 
-    let events_inner = Arc::new(Mutex::new(EventsInner::Dora(events)));
     let events = Py::new(
         py,
         Events {
-            inner: events_inner,
+            inner: EventsInner::Dora(events),
             _cleanup_handle: cleanup_handle,
         },
     )?;
