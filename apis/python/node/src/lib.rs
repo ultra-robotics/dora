@@ -102,7 +102,7 @@ def basicConfig(*pargs, **kwargs):
 #[derive(Dir, Dict, Str, Repr)]
 pub struct Node {
     events: Arc<Mutex<Events>>,
-    node: Arc<Mutex<DelayedCleanup<DoraNode>>>,
+    node: DelayedCleanup<DoraNode>,
 
     dataflow_id: DataflowId,
     node_id: NodeId,
@@ -139,7 +139,7 @@ impl Node {
             })),
             dataflow_id,
             node_id,
-            node: Arc::new(Mutex::new(node)),
+            node,
         })
     }
 
@@ -303,26 +303,19 @@ impl Node {
         py: Python,
     ) -> eyre::Result<()> {
         let parameters = pydict_to_metadata(metadata)?;
-        let rt = get_tokio_handle();
 
         if let Ok(py_bytes) = data.downcast_bound::<PyBytes>(py) {
             let data = py_bytes.as_bytes();
-            rt.block_on(async {
-                let mut node_guard = self.node.lock().await;
-                node_guard
-                    .get_mut()
-                    .send_output_bytes(output_id.into(), parameters, data.len(), data)
-                    .wrap_err("failed to send output")
-            })?;
+            self.node
+                .get_mut()
+                .send_output_bytes(output_id.into(), parameters, data.len(), data)
+                .wrap_err("failed to send output")?;
         } else if let Ok(arrow_array) = arrow::array::ArrayData::from_pyarrow_bound(data.bind(py)) {
-            rt.block_on(async {
-                let mut node_guard = self.node.lock().await;
-                node_guard.get_mut().send_output(
-                    output_id.into(),
-                    parameters,
-                    arrow::array::make_array(arrow_array),
-                )
-            })?;
+            self.node.get_mut().send_output(
+                output_id.into(),
+                parameters,
+                arrow::array::make_array(arrow_array),
+            )?;
         } else {
             eyre::bail!("invalid `data` type, must by `PyBytes` or arrow array")
         }
@@ -336,11 +329,7 @@ impl Node {
     ///
     /// :rtype: dict
     pub fn dataflow_descriptor(&self, py: Python) -> eyre::Result<PyObject> {
-        let rt = get_tokio_handle();
-        let descriptor = rt.block_on(async {
-            let mut node_guard = self.node.lock().await;
-            node_guard.get_mut().dataflow_descriptor().map(|d| d.clone())
-        })?;
+        let descriptor = self.node.get_mut().dataflow_descriptor()?.clone();
         Ok(pythonize::pythonize(py, &descriptor).map(|x| x.unbind())?)
     }
 
@@ -348,11 +337,7 @@ impl Node {
     ///
     /// :rtype: dict
     pub fn node_config(&self, py: Python) -> eyre::Result<PyObject> {
-        let rt = get_tokio_handle();
-        let config = rt.block_on(async {
-            let mut node_guard = self.node.lock().await;
-            node_guard.get_mut().node_config().clone()
-        });
+        let config = self.node.get_mut().node_config().clone();
         Ok(pythonize::pythonize(py, &config).map(|x| x.unbind())?)
     }
 
