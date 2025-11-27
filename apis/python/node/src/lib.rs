@@ -88,15 +88,14 @@ def basicConfig(*pargs, **kwargs):
 /// The custom node API lets you integrate `dora` into your application.
 /// It allows you to retrieve input and send output in any fashion you want.
 ///
-/// Use with:
+/// Note: This class cannot be instantiated directly. Use `init_node()` instead
+/// to get both a Node and Events object.
 ///
 /// ```python
-/// from dora import Node
+/// from dora import init_node
 ///
-/// node = Node()
+/// node, events = init_node()
 /// ```
-///
-/// :type node_id: str, optional
 #[pyclass]
 #[derive(Dir, Dict, Str, Repr)]
 pub struct Node {
@@ -108,31 +107,6 @@ pub struct Node {
 
 #[pymethods]
 impl Node {
-    #[new]
-    #[pyo3(signature = (node_id=None))]
-    pub fn new(node_id: Option<String>, py: Python) -> eyre::Result<Self> {
-        let (node, _events) = if let Some(node_id) = node_id {
-            DoraNode::init_flexible(NodeId::from(node_id))
-                .context("Could not setup node from node id. Make sure to have a running dataflow with this dynamic node")?
-        } else {
-            DoraNode::init_from_env().context("Could not initiate node from environment variable. For dynamic node, please add a node id in the initialization function.")?
-        };
-
-        let dataflow_id = *node.dataflow_id();
-        let node_id = node.id().clone();
-        let node = DelayedCleanup::new(node);
-
-        // Extend the `logging` module to interact with tracing
-        setup_logging(py, node_id.clone(), dataflow_id)?;
-
-        Ok(Node {
-            dataflow_id,
-            node_id,
-            node,
-        })
-    }
-
-
     /// `send_output` send data from the node.
     ///
     /// ```python
