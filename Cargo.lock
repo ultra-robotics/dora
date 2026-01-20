@@ -1597,6 +1597,7 @@ dependencies = [
  "crossbeam-skiplist",
  "ctrlc",
  "dora-arrow-convert",
+ "dora-coordinator",
  "dora-core",
  "dora-download",
  "dora-message",
@@ -5128,6 +5129,14 @@ dependencies = [
  "tempfile",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "rust-dataflow-example-run-forever"
+version = "0.4.0"
+dependencies = [
+ "dora-node-api",
+ "eyre",
 ]
 
 [[package]]

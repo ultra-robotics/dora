@@ -71,6 +71,18 @@ pub enum DaemonEvent {
         dataflow_id: DataflowId,
         metrics: BTreeMap<NodeId, NodeMetrics>,
     },
+    /// Node was stopped
+    NodeStopped {
+        dataflow_id: DataflowId,
+        node_id: NodeId,
+        /// Whether this was a temporary stop (restartable)
+        temporarily_stopped: bool,
+    },
+    /// Node was started (from temporarily stopped state)
+    NodeStarted {
+        dataflow_id: DataflowId,
+        node_id: NodeId,
+    },
 }
 
 /// Resource metrics for a node process
@@ -106,6 +118,8 @@ pub enum DaemonCoordinatorReply {
     TriggerSpawnResult(Result<(), String>),
     ReloadResult(Result<(), String>),
     StopResult(Result<(), String>),
+    StopNodeResult(Result<(), String>),
+    StartNodeResult(Result<(), String>),
     DestroyResult {
         result: Result<(), String>,
         #[serde(skip)]

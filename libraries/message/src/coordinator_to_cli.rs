@@ -47,6 +47,20 @@ pub enum ControlRequestReply {
         cli: Option<IpAddr>,
     },
     NodeInfoList(Vec<NodeInfo>),
+    /// Node was successfully stopped
+    NodeStopped {
+        dataflow_uuid: Uuid,
+        node_id: NodeId,
+    },
+    /// Node was successfully started
+    NodeStarted {
+        dataflow_uuid: Uuid,
+        node_id: NodeId,
+    },
+    /// Error stopping a node
+    NodeStopError { error: String },
+    /// Error starting a node
+    NodeStartError { error: String },
 }
 
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]

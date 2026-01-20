@@ -36,12 +36,12 @@ use eyre::{Context, ContextCompat, Result, bail, eyre};
 use futures::{FutureExt, TryFutureExt, future, stream};
 use futures_concurrency::stream::Merge;
 use local_listener::DynamicNodeEventWrapper;
-use log::{DaemonLogger, DataflowLogger, Logger};
+use log::{DaemonLogger, DataflowLogger, Logger, NodeLogger};
 use pending::PendingNodes;
 use process_wrap::tokio::TokioChildWrapper;
 use shared_memory_server::ShmemConf;
 use socket_stream_utils::socket_stream_send;
-use spawn::Spawner;
+use spawn::{PreparedNode, Spawner};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     env::current_dir,
@@ -453,6 +453,24 @@ impl Daemon {
                 }
                 Event::CtrlC => {
                     tracing::info!("received ctrlc signal -> stopping all dataflows");
+                    let to_drain: Vec<(Uuid, NodeId)> = self
+                        .running
+                        .iter()
+                        .flat_map(|(dfid, d)| {
+                            d.temporarily_stopped_nodes
+                                .keys()
+                                .map(|nid| (*dfid, nid.clone()))
+                                .collect::<Vec<_>>()
+                        })
+                        .collect();
+                    for (dataflow_id, node_id) in &to_drain {
+                        let _ = self.handle_outputs_done(*dataflow_id, node_id, false).await;
+                    }
+                    for (dataflow_id, node_id) in to_drain {
+                        if let Some(d) = self.running.get_mut(&dataflow_id) {
+                            d.temporarily_stopped_nodes.remove(&node_id);
+                        }
+                    }
                     for dataflow in self.running.values_mut() {
                         let mut logger = self.logger.for_dataflow(dataflow.id);
                         dataflow
@@ -497,7 +515,7 @@ impl Daemon {
                             .entry(dataflow_id)
                             .or_default()
                             .insert(node_id.clone(), Err(error));
-                        self.handle_node_stop(dataflow_id, &node_id, dynamic_node)
+                        self.handle_node_stop(dataflow_id, &node_id, dynamic_node, false)
                             .await?;
                     }
                 },
@@ -835,6 +853,20 @@ impl Daemon {
                 grace_duration,
                 force,
             } => {
+                let to_drain: Vec<NodeId> = self
+                    .running
+                    .get(&dataflow_id)
+                    .map(|d| d.temporarily_stopped_nodes.keys().cloned().collect())
+                    .unwrap_or_default();
+                for node_id in &to_drain {
+                    let _ = self.handle_outputs_done(dataflow_id, node_id, false).await;
+                }
+                for node_id in to_drain {
+                    if let Some(d) = self.running.get_mut(&dataflow_id) {
+                        d.temporarily_stopped_nodes.remove(&node_id);
+                    }
+                }
+
                 let mut logger = self.logger.for_dataflow(dataflow_id);
                 let dataflow = self
                     .running
@@ -862,6 +894,20 @@ impl Daemon {
                     future.await?;
                 }
 
+                RunStatus::Continue
+            }
+            DaemonCoordinatorEvent::StopNode { dataflow_id, node_id } => {
+                let result = self.handle_stop_node_command(dataflow_id, node_id).await;
+                let _ = reply_tx.send(Some(DaemonCoordinatorReply::StopNodeResult(
+                    result.map_err(|e| e.to_string()),
+                )));
+                RunStatus::Continue
+            }
+            DaemonCoordinatorEvent::StartNode { dataflow_id, node_id } => {
+                let result = self.handle_start_node_command(dataflow_id, node_id).await;
+                let _ = reply_tx.send(Some(DaemonCoordinatorReply::StartNodeResult(
+                    result.map_err(|e| e.to_string()),
+                )));
                 RunStatus::Continue
             }
             DaemonCoordinatorEvent::Destroy => {
@@ -1388,7 +1434,7 @@ impl Daemon {
             }
         }
         for (node_id, dynamic) in stopped {
-            self.handle_node_stop(dataflow_id, &node_id, dynamic)
+            self.handle_node_stop(dataflow_id, &node_id, dynamic, false)
                 .await?;
         }
 
@@ -1999,9 +2045,10 @@ impl Daemon {
         dataflow_id: Uuid,
         node_id: &NodeId,
         dynamic_node: bool,
+        temporarily_stopped: bool,
     ) -> eyre::Result<()> {
         let result = self
-            .handle_node_stop_inner(dataflow_id, node_id, dynamic_node)
+            .handle_node_stop_inner(dataflow_id, node_id, dynamic_node, temporarily_stopped)
             .await;
         let _ = self
             .events_tx
@@ -2021,6 +2068,7 @@ impl Daemon {
         dataflow_id: Uuid,
         node_id: &NodeId,
         dynamic_node: bool,
+        temporarily_stopped: bool,
     ) -> eyre::Result<()> {
         let mut logger = self.logger.for_dataflow(dataflow_id);
         let dataflow = match self.running.get_mut(&dataflow_id) {
@@ -2049,8 +2097,7 @@ impl Daemon {
             )
             .await?;
 
-        // node only reaches here if it will not be restarted
-        let might_restart = false;
+        let might_restart = temporarily_stopped;
 
         self.handle_outputs_done(dataflow_id, node_id, might_restart)
             .await?;
@@ -2059,12 +2106,36 @@ impl Daemon {
         let dataflow = self.running.get_mut(&dataflow_id).wrap_err_with(|| {
             format!("failed to get downstream nodes: no running dataflow with ID `{dataflow_id}`")
         })?;
+
+        if temporarily_stopped {
+            let node_logger = logger
+                .reborrow()
+                .for_node(node_id.clone())
+                .try_clone()
+                .await
+                .context("failed to clone node logger for temporary stop")?;
+            let prepared_node = dataflow
+                .running_nodes
+                .get_mut(node_id)
+                .and_then(|n| n.prepared_node.take())
+                .ok_or_else(|| eyre!("missing prepared_node for temporary stop (spawned nodes must have it)"))?;
+            dataflow.temporarily_stopped_nodes.insert(
+                node_id.clone(),
+                StoppedNodeContext {
+                    prepared_node,
+                    logger: node_logger,
+                },
+            );
+        }
+
+        dataflow.subscribe_channels.remove(node_id);
         dataflow.running_nodes.remove(node_id);
         if !dataflow.pending_nodes.local_nodes_pending()
             && dataflow
                 .running_nodes
                 .iter()
                 .all(|(_id, n)| n.node_config.dynamic)
+            && dataflow.temporarily_stopped_nodes.is_empty()
         {
             let result = DataflowDaemonResult {
                 timestamp: self.clock.new_timestamp(),
@@ -2106,6 +2177,101 @@ impl Daemon {
                     .wrap_err("failed to report dataflow finish to dora-coordinator")?;
             }
             self.running.remove(&dataflow_id);
+        }
+
+        Ok(())
+    }
+
+    async fn handle_stop_node_command(
+        &mut self,
+        dataflow_id: DataflowId,
+        node_id: NodeId,
+    ) -> eyre::Result<()> {
+        let dataflow = self
+            .running
+            .get_mut(&dataflow_id)
+            .ok_or_else(|| eyre!("no running dataflow with ID `{dataflow_id}`"))?;
+
+        if dataflow.temporarily_stopped_nodes.contains_key(&node_id) {
+            bail!("already temporarily stopped");
+        }
+
+        let node = dataflow
+            .running_nodes
+            .get_mut(&node_id)
+            .ok_or_else(|| eyre!("node not found or not running"))?;
+
+        if node.node_config.dynamic {
+            bail!("dynamic nodes cannot be temporarily stopped or restarted");
+        }
+
+        node.disable_restart();
+
+        if let Some(channel) = dataflow.subscribe_channels.get(&node_id) {
+            let _ = send_with_timestamp(channel, NodeEvent::Stop, &self.clock);
+        }
+
+        let Some(proc) = node.process.as_ref() else {
+            bail!("node has no process handle");
+        };
+
+        const GRACE_MS: u64 = 10_000;
+        let op_tx = proc.clone_sender();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(GRACE_MS)).await;
+            let _ = op_tx.send(crate::ProcessOperation::SoftKill);
+            tokio::time::sleep(Duration::from_millis(GRACE_MS / 2)).await;
+            let _ = op_tx.send(crate::ProcessOperation::Kill);
+        });
+
+        dataflow.temporarily_stopped_pending.insert(node_id);
+        Ok(())
+    }
+
+    async fn handle_start_node_command(
+        &mut self,
+        dataflow_id: DataflowId,
+        node_id: NodeId,
+    ) -> eyre::Result<()> {
+        let dataflow = self
+            .running
+            .get_mut(&dataflow_id)
+            .ok_or_else(|| eyre!("no running dataflow with ID `{dataflow_id}`"))?;
+
+        if dataflow.running_nodes.contains_key(&node_id) {
+            bail!("node is already running");
+        }
+        if dataflow.temporarily_stopped_pending.contains(&node_id) {
+            bail!("node is stopping");
+        }
+
+        let ctx = dataflow
+            .temporarily_stopped_nodes
+            .remove(&node_id)
+            .ok_or_else(|| eyre!("node not temporarily stopped"))?;
+
+        let running_node = ctx
+            .prepared_node
+            .spawn(ctx.logger)
+            .await
+            .context("failed to restart node")?;
+
+        dataflow.running_nodes.insert(node_id.clone(), running_node);
+
+        if let Some(connection) = &mut self.coordinator_connection {
+            let msg = serde_json::to_vec(&Timestamped {
+                inner: CoordinatorRequest::Event {
+                    daemon_id: self.daemon_id.clone(),
+                    event: DaemonEvent::NodeStarted {
+                        dataflow_id,
+                        node_id,
+                    },
+                },
+                timestamp: self.clock.new_timestamp(),
+            })?;
+            socket_stream_send(connection, &msg)
+                .await
+                .wrap_err("failed to send NodeStarted to coordinator")?;
         }
 
         Ok(())
@@ -2207,6 +2373,34 @@ impl Daemon {
                 exit_status,
                 restart,
             } => {
+                let is_temporary = self
+                    .running
+                    .get_mut(&dataflow_id)
+                    .map(|d| d.temporarily_stopped_pending.remove(&node_id))
+                    .unwrap_or(false);
+
+                if is_temporary {
+                    self.handle_node_stop(dataflow_id, &node_id, dynamic_node, true)
+                        .await?;
+                    if let Some(connection) = &mut self.coordinator_connection {
+                        let msg = serde_json::to_vec(&Timestamped {
+                            inner: CoordinatorRequest::Event {
+                                daemon_id: self.daemon_id.clone(),
+                                event: DaemonEvent::NodeStopped {
+                                    dataflow_id,
+                                    node_id: node_id.clone(),
+                                    temporarily_stopped: true,
+                                },
+                            },
+                            timestamp: self.clock.new_timestamp(),
+                        })?;
+                        socket_stream_send(connection, &msg)
+                            .await
+                            .wrap_err("failed to send NodeStopped to coordinator")?;
+                    }
+                    return Ok(());
+                }
+
                 let mut logger = self
                     .logger
                     .for_dataflow(dataflow_id)
@@ -2301,7 +2495,7 @@ impl Daemon {
                         .or_default()
                         .insert(node_id.clone(), node_result);
 
-                    self.handle_node_stop(dataflow_id, &node_id, dynamic_node)
+                    self.handle_node_stop(dataflow_id, &node_id, dynamic_node, false)
                         .await?;
                 }
             }
@@ -2552,7 +2746,14 @@ fn close_input(
     }
 }
 
-#[derive(Debug)]
+/// Context needed to restart a temporarily stopped node
+struct StoppedNodeContext {
+    /// The PreparedNode that can be used to restart the node
+    prepared_node: PreparedNode,
+    /// The logger for this node
+    logger: NodeLogger<'static>,
+}
+
 pub struct RunningNode {
     process: Option<ProcessHandle>,
     node_config: NodeConfig,
@@ -2563,6 +2764,21 @@ pub struct RunningNode {
     /// This flag is set when all inputs of the node were closed and when a manual stop command
     /// was sent.
     disable_restart: Arc<AtomicBool>,
+    /// Stored PreparedNode for restart when node is temporarily stopped. Set in PreparedNode::spawn.
+    pub(crate) prepared_node: Option<PreparedNode>,
+}
+
+impl std::fmt::Debug for RunningNode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RunningNode")
+            .field("process", &self.process)
+            .field("node_config", &self.node_config)
+            .field("pid", &self.pid)
+            .field("restart_policy", &self.restart_policy)
+            .field("disable_restart", &self.disable_restart)
+            .field("prepared_node", &self.prepared_node.is_some())
+            .finish()
+    }
 }
 
 impl RunningNode {
@@ -2636,6 +2852,11 @@ impl ProcessHandle {
     pub fn submit(&self, operation: ProcessOperation) -> bool {
         self.op_tx.send(operation).is_ok()
     }
+
+    /// Clone of the operation sender for use in spawned tasks (e.g. grace-period kill).
+    pub fn clone_sender(&self) -> flume::Sender<ProcessOperation> {
+        self.op_tx.clone()
+    }
 }
 
 impl Drop for ProcessHandle {
@@ -2662,6 +2883,11 @@ pub struct RunningDataflow {
     timers: BTreeMap<Duration, BTreeSet<InputId>>,
     open_inputs: BTreeMap<NodeId, BTreeSet<DataId>>,
     running_nodes: BTreeMap<NodeId, RunningNode>,
+
+    /// Nodes that were temporarily stopped (can be restarted).
+    temporarily_stopped_nodes: BTreeMap<NodeId, StoppedNodeContext>,
+    /// Nodes for which we have initiated a temporary stop; cleanup runs in SpawnedNodeResult.
+    temporarily_stopped_pending: BTreeSet<NodeId>,
 
     /// List of all dynamic node IDs.
     ///
@@ -2712,6 +2938,8 @@ impl RunningDataflow {
             timers: BTreeMap::new(),
             open_inputs: BTreeMap::new(),
             running_nodes: BTreeMap::new(),
+            temporarily_stopped_nodes: BTreeMap::new(),
+            temporarily_stopped_pending: BTreeSet::new(),
             dynamic_nodes: BTreeSet::new(),
             open_external_mappings: Default::default(),
             pending_drop_tokens: HashMap::new(),

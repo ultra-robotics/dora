@@ -55,6 +55,16 @@ pub enum DaemonCoordinatorEvent {
         node_id: NodeId,
         tail: Option<usize>,
     },
+    /// Stop a specific node (temporary stop only; can be restarted via StartNode)
+    StopNode {
+        dataflow_id: DataflowId,
+        node_id: NodeId,
+    },
+    /// Start a previously temporarily stopped node
+    StartNode {
+        dataflow_id: DataflowId,
+        node_id: NodeId,
+    },
     Destroy,
     Heartbeat,
 }

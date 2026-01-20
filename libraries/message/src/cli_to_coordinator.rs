@@ -91,4 +91,14 @@ pub enum ControlRequest {
     },
     CliAndDefaultDaemonOnSameMachine,
     GetNodeInfo,
+    /// Stop a specific node in a dataflow (temporary stop only; can be restarted via StartNode)
+    StopNode {
+        dataflow_uuid: Uuid,
+        node_id: NodeId,
+    },
+    /// Start a previously temporarily stopped node
+    StartNode {
+        dataflow_uuid: Uuid,
+        node_id: NodeId,
+    },
 }

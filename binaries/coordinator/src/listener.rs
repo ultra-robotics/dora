@@ -152,6 +152,21 @@ pub async fn handle_connection(
                         break;
                     }
                 }
+                DaemonEvent::NodeStopped {
+                    dataflow_id,
+                    node_id,
+                    temporarily_stopped,
+                } => {
+                    tracing::debug!(
+                        "node {node_id} stopped in dataflow {dataflow_id} (temporarily: {temporarily_stopped})"
+                    );
+                }
+                DaemonEvent::NodeStarted {
+                    dataflow_id,
+                    node_id,
+                } => {
+                    tracing::debug!("node {node_id} started in dataflow {dataflow_id}");
+                }
             },
         };
     }

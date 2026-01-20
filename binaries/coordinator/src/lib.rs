@@ -573,6 +573,52 @@ async fn start_inner(
                                     });
                             let _ = reply_sender.send(reply);
                         }
+                        ControlRequest::StopNode {
+                            dataflow_uuid,
+                            node_id,
+                        } => {
+                            let result = handle_stop_node(
+                                &running_dataflows,
+                                dataflow_uuid,
+                                node_id.clone(),
+                                &mut daemon_connections,
+                                clock.new_timestamp(),
+                            )
+                            .await;
+                            let reply = match result {
+                                Ok(()) => ControlRequestReply::NodeStopped {
+                                    dataflow_uuid,
+                                    node_id,
+                                },
+                                Err(e) => ControlRequestReply::NodeStopError {
+                                    error: e.to_string(),
+                                },
+                            };
+                            let _ = reply_sender.send(Ok(reply));
+                        }
+                        ControlRequest::StartNode {
+                            dataflow_uuid,
+                            node_id,
+                        } => {
+                            let result = handle_start_node(
+                                &running_dataflows,
+                                dataflow_uuid,
+                                node_id.clone(),
+                                &mut daemon_connections,
+                                clock.new_timestamp(),
+                            )
+                            .await;
+                            let reply = match result {
+                                Ok(()) => ControlRequestReply::NodeStarted {
+                                    dataflow_uuid,
+                                    node_id,
+                                },
+                                Err(e) => ControlRequestReply::NodeStartError {
+                                    error: e.to_string(),
+                                },
+                            };
+                            let _ = reply_sender.send(Ok(reply));
+                        }
                         ControlRequest::Stop {
                             dataflow_uuid,
                             grace_duration,
@@ -1292,6 +1338,102 @@ async fn reload_dataflow(
         }
     }
     tracing::info!("successfully reloaded dataflow `{dataflow_id}`");
+
+    Ok(())
+}
+
+async fn handle_stop_node(
+    running_dataflows: &HashMap<Uuid, RunningDataflow>,
+    dataflow_uuid: Uuid,
+    node_id: NodeId,
+    daemon_connections: &mut DaemonConnections,
+    timestamp: uhlc::Timestamp,
+) -> eyre::Result<()> {
+    let dataflow = running_dataflows
+        .get(&dataflow_uuid)
+        .ok_or_else(|| eyre!("no known running dataflow with UUID `{dataflow_uuid}`"))?;
+
+    let daemon_id = dataflow
+        .node_to_daemon
+        .get(&node_id)
+        .ok_or_else(|| eyre!("node `{node_id}` not found in dataflow"))?;
+
+    let daemon_connection = daemon_connections
+        .get_mut(daemon_id)
+        .wrap_err("no daemon connection")?;
+
+    let message = serde_json::to_vec(&Timestamped {
+        inner: DaemonCoordinatorEvent::StopNode {
+            dataflow_id: dataflow_uuid,
+            node_id,
+        },
+        timestamp,
+    })?;
+
+    tcp_send(&mut daemon_connection.stream, &message)
+        .await
+        .wrap_err("failed to send stop node message to daemon")?;
+
+    let reply_raw = tcp_receive(&mut daemon_connection.stream)
+        .await
+        .wrap_err("failed to receive stop node reply from daemon")?;
+
+    match serde_json::from_slice(&reply_raw)
+        .wrap_err("failed to deserialize stop node reply from daemon")?
+    {
+        DaemonCoordinatorReply::StopNodeResult(result) => {
+            result.map_err(|e| eyre!(e)).wrap_err("failed to stop node")?
+        }
+        other => bail!("unexpected reply after sending stop node: {other:?}"),
+    }
+
+    Ok(())
+}
+
+async fn handle_start_node(
+    running_dataflows: &HashMap<Uuid, RunningDataflow>,
+    dataflow_uuid: Uuid,
+    node_id: NodeId,
+    daemon_connections: &mut DaemonConnections,
+    timestamp: uhlc::Timestamp,
+) -> eyre::Result<()> {
+    let dataflow = running_dataflows
+        .get(&dataflow_uuid)
+        .ok_or_else(|| eyre!("no known running dataflow with UUID `{dataflow_uuid}`"))?;
+
+    let daemon_id = dataflow
+        .node_to_daemon
+        .get(&node_id)
+        .ok_or_else(|| eyre!("node `{node_id}` not found in dataflow"))?;
+
+    let daemon_connection = daemon_connections
+        .get_mut(daemon_id)
+        .wrap_err("no daemon connection")?;
+
+    let message = serde_json::to_vec(&Timestamped {
+        inner: DaemonCoordinatorEvent::StartNode {
+            dataflow_id: dataflow_uuid,
+            node_id: node_id.clone(),
+        },
+        timestamp,
+    })?;
+
+    tcp_send(&mut daemon_connection.stream, &message)
+        .await
+        .wrap_err("failed to send start node message to daemon")?;
+
+    let reply_raw = tcp_receive(&mut daemon_connection.stream)
+        .await
+        .wrap_err("failed to receive start node reply from daemon")?;
+
+    match serde_json::from_slice(&reply_raw)
+        .wrap_err("failed to deserialize start node reply from daemon")?
+    {
+        DaemonCoordinatorReply::StartNodeResult(result) => {
+            result.map_err(|e| eyre!(e)).wrap_err("failed to start node")?
+        }
+        other => bail!("unexpected reply after sending start node: {other:?}"),
+    }
 
     Ok(())
 }

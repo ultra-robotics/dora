@@ -61,6 +61,7 @@ impl PreparedNode {
     }
 
     pub async fn spawn(self, mut logger: NodeLogger<'static>) -> eyre::Result<RunningNode> {
+        let for_restart = self.clone();
         let (op_tx, op_rx) = flume::bounded(2);
         let (finished_tx, finished_rx) = oneshot::channel();
         let kind = self
@@ -75,8 +76,8 @@ impl PreparedNode {
                 NodeKind::Dynamic => None,
                 NodeKind::Spawned { .. } => Some(crate::ProcessHandle::new(op_tx)),
             },
-            node_config: self.node_config.clone(),
-            restart_policy: self.restart_policy(),
+            node_config: for_restart.node_config.clone(),
+            restart_policy: for_restart.restart_policy(),
             disable_restart: disable_restart.clone(),
             pid: match kind {
                 NodeKind::Dynamic => None,
@@ -84,6 +85,10 @@ impl PreparedNode {
                     pid.store(new_pid, atomic::Ordering::Release);
                     Some(pid.clone())
                 }
+            },
+            prepared_node: match &kind {
+                NodeKind::Dynamic => None,
+                NodeKind::Spawned { .. } => Some(for_restart),
             },
         };
 
