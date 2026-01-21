@@ -55,6 +55,8 @@ pub struct NodeInfo {
     pub dataflow_name: Option<String>,
     pub node_id: NodeId,
     pub daemon_id: DaemonId,
+    /// Node has exited (crashed or finished) before the dataflow ended.
+    pub exited: bool,
     pub metrics: Option<NodeMetricsInfo>,
 }
 

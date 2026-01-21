@@ -71,6 +71,11 @@ pub enum DaemonEvent {
         dataflow_id: DataflowId,
         metrics: BTreeMap<NodeId, NodeMetrics>,
     },
+    /// Emitted when a node process has exited (crashed or finished, no restart).
+    NodeStopped {
+        dataflow_id: DataflowId,
+        node_id: NodeId,
+    },
 }
 
 /// Resource metrics for a node process

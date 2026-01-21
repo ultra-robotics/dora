@@ -107,7 +107,14 @@ fn list(
     let entries: Vec<OutputEntry> = filtered_nodes
         .into_iter()
         .map(|node| {
-            let (status, pid, cpu, memory) = if let Some(metrics) = node.metrics {
+            let (status, pid, cpu, memory) = if node.exited {
+                (
+                    "Exited".to_string(),
+                    "-".to_string(),
+                    "-".to_string(),
+                    "-".to_string(),
+                )
+            } else if let Some(metrics) = node.metrics {
                 (
                     "Running".to_string(),
                     metrics.pid.to_string(),

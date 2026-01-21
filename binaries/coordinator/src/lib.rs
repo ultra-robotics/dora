@@ -781,27 +781,34 @@ async fn start_inner(
                                 for (node_id, _node) in &dataflow.nodes {
                                     // Get the specific daemon this node is running on
                                     if let Some(daemon_id) = dataflow.node_to_daemon.get(node_id) {
-                                        // Get metrics if available
-                                        let metrics = dataflow.node_metrics.get(node_id).map(|m| {
-                                            NodeMetricsInfo {
-                                                pid: m.pid,
-                                                cpu_usage: m.cpu_usage,
-                                                // Use 1000 for MB (megabytes) instead of 1024 (mebibytes)
-                                                memory_mb: m.memory_bytes as f64 / 1000.0 / 1000.0,
-                                                disk_read_mb_s: m
-                                                    .disk_read_bytes
-                                                    .map(|b| b as f64 / 1000.0 / 1000.0),
-                                                disk_write_mb_s: m
-                                                    .disk_write_bytes
-                                                    .map(|b| b as f64 / 1000.0 / 1000.0),
-                                            }
-                                        });
+                                        let exited = dataflow.exited_before_subscribe.contains(node_id)
+                                            || dataflow.exited_nodes.contains(node_id);
+                                        // Omit metrics for exited nodes (avoid stale data)
+                                        let metrics = if exited {
+                                            None
+                                        } else {
+                                            dataflow.node_metrics.get(node_id).map(|m| {
+                                                NodeMetricsInfo {
+                                                    pid: m.pid,
+                                                    cpu_usage: m.cpu_usage,
+                                                    // Use 1000 for MB (megabytes) instead of 1024 (mebibytes)
+                                                    memory_mb: m.memory_bytes as f64 / 1000.0 / 1000.0,
+                                                    disk_read_mb_s: m
+                                                        .disk_read_bytes
+                                                        .map(|b| b as f64 / 1000.0 / 1000.0),
+                                                    disk_write_mb_s: m
+                                                        .disk_write_bytes
+                                                        .map(|b| b as f64 / 1000.0 / 1000.0),
+                                                }
+                                            })
+                                        };
 
                                         node_infos.push(NodeInfo {
                                             dataflow_id: dataflow.uuid,
                                             dataflow_name: dataflow.name.clone(),
                                             node_id: node_id.clone(),
                                             daemon_id: daemon_id.clone(),
+                                            exited,
                                             metrics,
                                         });
                                     }
@@ -931,6 +938,16 @@ async fn start_inner(
                     for (node_id, node_metrics) in metrics {
                         dataflow.node_metrics.insert(node_id, node_metrics);
                     }
+                }
+            }
+            Event::NodeStopped {
+                dataflow_id,
+                node_id,
+                ..
+            } => {
+                if let Some(dataflow) = running_dataflows.get_mut(&dataflow_id) {
+                    dataflow.node_metrics.remove(&node_id);
+                    dataflow.exited_nodes.insert(node_id.clone());
                 }
             }
             Event::DataflowBuildResult {
@@ -1115,6 +1132,8 @@ struct RunningDataflow {
     node_to_daemon: BTreeMap<NodeId, DaemonId>,
     /// Latest metrics for each node (from daemons)
     node_metrics: BTreeMap<NodeId, dora_message::daemon_to_coordinator::NodeMetrics>,
+    /// Nodes that have exited (crashed or finished) before the dataflow ended.
+    exited_nodes: BTreeSet<NodeId>,
 
     spawn_result: CachedResult,
     stop_reply_senders: Vec<tokio::sync::oneshot::Sender<eyre::Result<ControlRequestReply>>>,
@@ -1532,6 +1551,7 @@ async fn start_dataflow(
         nodes,
         node_to_daemon,
         node_metrics: BTreeMap::new(),
+        exited_nodes: BTreeSet::new(),
         spawn_result: CachedResult::default(),
         stop_reply_senders: Vec::new(),
         buffered_log_messages: Vec::new(),
@@ -1625,6 +1645,11 @@ pub enum Event {
         dataflow_id: uuid::Uuid,
         metrics: BTreeMap<NodeId, dora_message::daemon_to_coordinator::NodeMetrics>,
     },
+    NodeStopped {
+        dataflow_id: uuid::Uuid,
+        daemon_id: DaemonId,
+        node_id: NodeId,
+    },
 }
 
 impl Event {
@@ -1652,6 +1677,7 @@ impl Event {
             Event::DataflowBuildResult { .. } => "DataflowBuildResult",
             Event::DataflowSpawnResult { .. } => "DataflowSpawnResult",
             Event::NodeMetrics { .. } => "NodeMetrics",
+            Event::NodeStopped { .. } => "NodeStopped",
         }
     }
 }
