@@ -1,0 +1,25 @@
+# Dataflow for trying `dora node stop` and `dora node start` manually.
+# Chain: producer -> forwarder -> run-forever. Stop/start any node to verify.
+
+nodes:
+  - id: producer
+    path: producer.py
+    inputs:
+      tick: dora/timer/millis/1000
+    outputs:
+      - data
+
+  - id: forwarder
+    path: forwarder.py
+    inputs:
+      tick: dora/timer/millis/60000
+      data: producer/data
+    outputs:
+      - data
+
+  - id: run-forever
+    path: run_forever.py
+    restart_policy: on-failure
+    inputs:
+      tick: dora/timer/millis/60000
+      data: forwarder/data

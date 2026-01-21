@@ -104,6 +104,13 @@ impl PreparedNode {
         }
     }
 
+    fn restart_delay_secs(&self) -> f64 {
+        match &self.node.kind {
+            dora_core::descriptor::CoreNodeKind::Custom(n) => n.restart_delay_secs.unwrap_or(0.0),
+            dora_core::descriptor::CoreNodeKind::Runtime(_) => 0.0,
+        }
+    }
+
     async fn restart_loop(
         self,
         mut logger: NodeLogger<'static>,
@@ -174,6 +181,13 @@ impl PreparedNode {
                             "restarting node after failure".to_string(),
                         )
                         .await;
+                }
+                let delay_secs = self.restart_delay_secs().max(0.0);
+                if delay_secs > 0.0 {
+                    tokio::time::sleep(std::time::Duration::from_secs_f64(delay_secs)).await;
+                }
+                if disable_restart.load(atomic::Ordering::Acquire) {
+                    break;
                 }
                 let (finished_tx, finished_rx_new) = oneshot::channel();
                 let result = self

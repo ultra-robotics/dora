@@ -65,6 +65,14 @@
           "description": "Path of the source code\n\nIf you want to use a specific `conda` environment.\nProvide the python path within the source.\n\nsource: /home/peter/miniconda3/bin/python\n\nargs: some_node.py\n\nSource can match any executable in PATH.",
           "type": "string"
         },
+        "restart_delay_secs": {
+          "description": "Delay in seconds before each automatic restart. Fractional seconds supported. Defaults to 0.",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
+        },
         "restart_policy": {
           "$ref": "#/$defs/RestartPolicy",
           "default": "never"
@@ -344,6 +352,14 @@
             "string",
             "null"
           ]
+        },
+        "restart_delay_secs": {
+          "description": "Delay in seconds before restarting the node after it exits.\n\nOnly applied when the node is automatically restarted (e.g. `restart_policy: on-failure` or\n`always`). Fractional seconds are supported (e.g. `1.5`). Defaults to 0 (no delay).",
+          "type": [
+            "number",
+            "null"
+          ],
+          "format": "double"
         },
         "restart_policy": {
           "description": "Whether this node should be restarted on exit or error.\n\nDefaults to `RestartPolicy::Never`.",

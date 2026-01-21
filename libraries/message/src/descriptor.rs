@@ -486,6 +486,13 @@ pub struct Node {
     #[serde(default)]
     pub restart_policy: RestartPolicy,
 
+    /// Delay in seconds before restarting the node after it exits.
+    ///
+    /// Only applied when the node is automatically restarted (e.g. `restart_policy: on-failure` or
+    /// `always`). Fractional seconds are supported (e.g. `1.5`). Defaults to 0 (no delay).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart_delay_secs: Option<f64>,
+
     /// Unstable machine deployment configuration
     #[schemars(skip)]
     #[serde(rename = "_unstable_deploy")]
@@ -671,6 +678,10 @@ pub struct CustomNode {
 
     #[serde(default)]
     pub restart_policy: RestartPolicy,
+
+    /// Delay in seconds before each automatic restart. Fractional seconds supported. Defaults to 0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart_delay_secs: Option<f64>,
 
     #[serde(flatten)]
     pub run_config: NodeRunConfig,

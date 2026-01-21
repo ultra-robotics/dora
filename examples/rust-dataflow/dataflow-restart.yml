@@ -11,6 +11,7 @@ nodes:
     build: cargo build -p rust-dataflow-example-status-node
     path: ../../target/debug/rust-dataflow-example-status-node
     restart_policy: on-failure
+    restart_delay_secs: 2
     inputs:
       tick: dora/timer/millis/100
       fail: dora/timer/millis/400
