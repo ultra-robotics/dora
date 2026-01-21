@@ -11,8 +11,10 @@ import pyarrow as pa
 def read_data_task(node, log):
     """Task that reads incoming events."""
     while (event := node.next()) is not None:
-        if event["type"] == "INPUT":
+        if event["type"] == "INPUT" and event["id"] == "data":
             print(f"info {event['value'].to_numpy()}")
+            if event["value"].to_numpy()[0] % 2 == 0:
+                raise Exception("Even number received")
         del event
     log.log(logging.INFO, "read_data_task done!")
 
@@ -41,6 +43,7 @@ def main():
     read_thread.join()
     
     log.log(logging.INFO, "done!")
+    exit(1)
 
 
 if __name__ == "__main__":

@@ -14,12 +14,12 @@ use dora_message::{
     common::{DaemonId, GitSource},
     coordinator_to_cli::{
         ControlRequestReply, DataflowIdAndName, DataflowList, DataflowListEntry, DataflowResult,
-        DataflowStatus, LogLevel, LogMessage,
+        DataflowStatus, LogLevel, LogMessage, NodeStatus,
     },
     coordinator_to_daemon::{
         BuildDataflowNodes, DaemonCoordinatorEvent, RegisterResult, Timestamped,
     },
-    daemon_to_coordinator::{DaemonCoordinatorReply, DataflowDaemonResult},
+    daemon_to_coordinator::{DaemonCoordinatorReply, DataflowDaemonResult, NodeMetrics},
     descriptor::{Descriptor, ResolvedNode},
 };
 use eyre::{ContextCompat, Result, WrapErr, bail, eyre};
@@ -304,6 +304,15 @@ async fn start_inner(
                         std::collections::hash_map::Entry::Occupied(mut entry) => {
                             let dataflow = entry.get_mut();
                             dataflow.pending_daemons.remove(&daemon_id);
+                            for node_id in &exited_before_subscribe {
+                                dataflow.node_states.insert(
+                                    node_id.clone(),
+                                    NodeStateEntry {
+                                        status: NodeStatus::Exited,
+                                        metrics: None,
+                                    },
+                                );
+                            }
                             dataflow
                                 .exited_before_subscribe
                                 .extend(exited_before_subscribe);
@@ -779,29 +788,35 @@ async fn start_inner(
                             let mut node_infos = Vec::new();
                             for dataflow in running_dataflows.values() {
                                 for (node_id, _node) in &dataflow.nodes {
-                                    // Get the specific daemon this node is running on
                                     if let Some(daemon_id) = dataflow.node_to_daemon.get(node_id) {
-                                        // Get metrics if available
-                                        let metrics = dataflow.node_metrics.get(node_id).map(|m| {
-                                            NodeMetricsInfo {
-                                                pid: m.pid,
-                                                cpu_usage: m.cpu_usage,
-                                                // Use 1000 for MB (megabytes) instead of 1024 (mebibytes)
-                                                memory_mb: m.memory_bytes as f64 / 1000.0 / 1000.0,
-                                                disk_read_mb_s: m
-                                                    .disk_read_bytes
-                                                    .map(|b| b as f64 / 1000.0 / 1000.0),
-                                                disk_write_mb_s: m
-                                                    .disk_write_bytes
-                                                    .map(|b| b as f64 / 1000.0 / 1000.0),
-                                            }
-                                        });
+                                        let state = dataflow.node_states.get(node_id);
+                                        let status = state
+                                            .map(|s| s.status)
+                                            .unwrap_or(NodeStatus::Unknown);
+                                        let metrics = state.and_then(|s| s.metrics.as_ref()).map(
+                                            |m| {
+                                                NodeMetricsInfo {
+                                                    pid: m.pid,
+                                                    cpu_usage: m.cpu_usage,
+                                                    memory_mb: m.memory_bytes as f64
+                                                        / 1000.0
+                                                        / 1000.0,
+                                                    disk_read_mb_s: m
+                                                        .disk_read_bytes
+                                                        .map(|b| b as f64 / 1000.0 / 1000.0),
+                                                    disk_write_mb_s: m
+                                                        .disk_write_bytes
+                                                        .map(|b| b as f64 / 1000.0 / 1000.0),
+                                                }
+                                            },
+                                        );
 
                                         node_infos.push(NodeInfo {
                                             dataflow_id: dataflow.uuid,
                                             dataflow_name: dataflow.name.clone(),
                                             node_id: node_id.clone(),
                                             daemon_id: daemon_id.clone(),
+                                            status,
                                             metrics,
                                         });
                                     }
@@ -926,11 +941,46 @@ async fn start_inner(
                 dataflow_id,
                 metrics,
             } => {
-                // Store metrics for this dataflow
                 if let Some(dataflow) = running_dataflows.get_mut(&dataflow_id) {
                     for (node_id, node_metrics) in metrics {
-                        dataflow.node_metrics.insert(node_id, node_metrics);
+                        dataflow.node_states.insert(
+                            node_id,
+                            NodeStateEntry {
+                                status: NodeStatus::Running,
+                                metrics: Some(node_metrics),
+                            },
+                        );
                     }
+                }
+            }
+            Event::NodeStopped {
+                dataflow_id,
+                node_id,
+                ..
+            } => {
+                if let Some(dataflow) = running_dataflows.get_mut(&dataflow_id) {
+                    dataflow.node_states.insert(
+                        node_id.clone(),
+                        NodeStateEntry {
+                            status: NodeStatus::Exited,
+                            metrics: None,
+                        },
+                    );
+                }
+            }
+            Event::NodeRestarting {
+                dataflow_id,
+                node_id,
+                ..
+            } => {
+                if let Some(dataflow) = running_dataflows.get_mut(&dataflow_id) {
+                    dataflow.node_states.insert(
+                        node_id.clone(),
+                        NodeStateEntry {
+                            status: NodeStatus::Restarting,
+                            metrics: None,
+                        },
+                    );
                 }
             }
             Event::DataflowBuildResult {
@@ -1101,6 +1151,12 @@ struct RunningBuild {
     pending_build_results: BTreeSet<DaemonId>,
 }
 
+/// Per-node state: status and optional metrics. Replaces separate node_metrics and exited_nodes.
+struct NodeStateEntry {
+    status: NodeStatus,
+    metrics: Option<NodeMetrics>,
+}
+
 struct RunningDataflow {
     name: Option<String>,
     uuid: Uuid,
@@ -1113,8 +1169,8 @@ struct RunningDataflow {
     nodes: BTreeMap<NodeId, ResolvedNode>,
     /// Maps each node to the daemon it's running on
     node_to_daemon: BTreeMap<NodeId, DaemonId>,
-    /// Latest metrics for each node (from daemons)
-    node_metrics: BTreeMap<NodeId, dora_message::daemon_to_coordinator::NodeMetrics>,
+    /// Unified node state: status and metrics. Updated by NodeMetrics, NodeStopped, ReadyOnDaemon.
+    node_states: BTreeMap<NodeId, NodeStateEntry>,
 
     spawn_result: CachedResult,
     stop_reply_senders: Vec<tokio::sync::oneshot::Sender<eyre::Result<ControlRequestReply>>>,
@@ -1531,7 +1587,7 @@ async fn start_dataflow(
         daemons: daemons.clone(),
         nodes,
         node_to_daemon,
-        node_metrics: BTreeMap::new(),
+        node_states: BTreeMap::new(),
         spawn_result: CachedResult::default(),
         stop_reply_senders: Vec::new(),
         buffered_log_messages: Vec::new(),
@@ -1625,6 +1681,16 @@ pub enum Event {
         dataflow_id: uuid::Uuid,
         metrics: BTreeMap<NodeId, dora_message::daemon_to_coordinator::NodeMetrics>,
     },
+    NodeStopped {
+        dataflow_id: uuid::Uuid,
+        daemon_id: DaemonId,
+        node_id: NodeId,
+    },
+    NodeRestarting {
+        dataflow_id: uuid::Uuid,
+        daemon_id: DaemonId,
+        node_id: NodeId,
+    },
 }
 
 impl Event {
@@ -1652,6 +1718,8 @@ impl Event {
             Event::DataflowBuildResult { .. } => "DataflowBuildResult",
             Event::DataflowSpawnResult { .. } => "DataflowSpawnResult",
             Event::NodeMetrics { .. } => "NodeMetrics",
+            Event::NodeStopped { .. } => "NodeStopped",
+            Event::NodeRestarting { .. } => "NodeRestarting",
         }
     }
 }

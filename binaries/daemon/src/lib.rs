@@ -2000,6 +2000,22 @@ impl Daemon {
         node_id: &NodeId,
         dynamic_node: bool,
     ) -> eyre::Result<()> {
+        // Notify coordinator so `dora node list` can show "Exited" for crashed nodes.
+        if let Some(connection) = &mut self.coordinator_connection {
+            let msg = serde_json::to_vec(&Timestamped {
+                inner: CoordinatorRequest::Event {
+                    daemon_id: self.daemon_id.clone(),
+                    event: DaemonEvent::NodeStopped {
+                        dataflow_id,
+                        node_id: node_id.clone(),
+                    },
+                },
+                timestamp: self.clock.new_timestamp(),
+            })?;
+            socket_stream_send(connection, &msg)
+                .await
+                .wrap_err("failed to send NodeStopped to dora-coordinator")?;
+        }
         let result = self
             .handle_node_stop_inner(dataflow_id, node_id, dynamic_node)
             .await;
@@ -2288,6 +2304,22 @@ impl Daemon {
                     .await;
 
                 if restart {
+                    // Notify coordinator so `dora node list` shows "Restarting" immediately.
+                    if let Some(connection) = &mut self.coordinator_connection {
+                        let msg = serde_json::to_vec(&Timestamped {
+                            inner: CoordinatorRequest::Event {
+                                daemon_id: self.daemon_id.clone(),
+                                event: DaemonEvent::NodeRestarting {
+                                    dataflow_id,
+                                    node_id: node_id.clone(),
+                                },
+                            },
+                            timestamp: self.clock.new_timestamp(),
+                        })?;
+                        socket_stream_send(connection, &msg)
+                            .await
+                            .wrap_err("failed to send NodeRestarting to dora-coordinator")?;
+                    }
                     logger
                         .log(
                             LogLevel::Info,
