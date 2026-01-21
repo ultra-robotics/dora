@@ -76,6 +76,11 @@ pub enum DaemonEvent {
         dataflow_id: DataflowId,
         node_id: NodeId,
     },
+    /// Emitted when a node has crashed and will be restarted (restart policy in effect).
+    NodeRestarting {
+        dataflow_id: DataflowId,
+        node_id: NodeId,
+    },
 }
 
 /// Resource metrics for a node process

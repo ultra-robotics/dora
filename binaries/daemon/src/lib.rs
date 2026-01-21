@@ -2304,6 +2304,22 @@ impl Daemon {
                     .await;
 
                 if restart {
+                    // Notify coordinator so `dora node list` shows "Restarting" immediately.
+                    if let Some(connection) = &mut self.coordinator_connection {
+                        let msg = serde_json::to_vec(&Timestamped {
+                            inner: CoordinatorRequest::Event {
+                                daemon_id: self.daemon_id.clone(),
+                                event: DaemonEvent::NodeRestarting {
+                                    dataflow_id,
+                                    node_id: node_id.clone(),
+                                },
+                            },
+                            timestamp: self.clock.new_timestamp(),
+                        })?;
+                        socket_stream_send(connection, &msg)
+                            .await
+                            .wrap_err("failed to send NodeRestarting to dora-coordinator")?;
+                    }
                     logger
                         .log(
                             LogLevel::Info,
