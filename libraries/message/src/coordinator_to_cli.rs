@@ -8,6 +8,26 @@ use uuid::Uuid;
 pub use crate::common::{LogLevel, LogMessage, NodeError, NodeErrorCause, NodeExitStatus};
 use crate::{BuildId, common::DaemonId, descriptor::Descriptor, id::NodeId};
 
+/// Runtime status of a node in a dataflow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NodeStatus {
+    /// Node process is running and reporting metrics.
+    Running,
+    /// Node has exited (crashed or finished) before the dataflow ended.
+    Exited,
+    /// Node is in the process of restarting (e.g. after a crash with restart policy).
+    Restarting,
+    /// Status is unclear (e.g. starting up, or no metrics yet).
+    Unknown,
+}
+
+impl Default for NodeStatus {
+    fn default() -> Self {
+        NodeStatus::Unknown
+    }
+}
+
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub enum ControlRequestReply {
     Error(String),
@@ -55,8 +75,9 @@ pub struct NodeInfo {
     pub dataflow_name: Option<String>,
     pub node_id: NodeId,
     pub daemon_id: DaemonId,
-    /// Node has exited (crashed or finished) before the dataflow ended.
-    pub exited: bool,
+    /// Current runtime status of the node.
+    #[serde(default)]
+    pub status: NodeStatus,
     pub metrics: Option<NodeMetricsInfo>,
 }
 

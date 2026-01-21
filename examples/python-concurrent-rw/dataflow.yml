@@ -1,14 +1,18 @@
 nodes:
   - id: node1
     path: ./receive_data.py
+    restart_policy: on-failure
     inputs:
+      tick: dora/timer/millis/1000
       data: node2/data
     outputs:
       - data
 
   - id: node2
     path: ./receive_data.py
+    restart_policy: on-failure
     inputs:
+      tick: dora/timer/millis/1000
       data: node1/data
     outputs:
       - data

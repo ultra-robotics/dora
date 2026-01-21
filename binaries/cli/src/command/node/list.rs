@@ -13,7 +13,7 @@ use crate::{
 use communication_layer_request_reply::TcpRequestReplyConnection;
 use dora_message::{
     cli_to_coordinator::ControlRequest,
-    coordinator_to_cli::{ControlRequestReply, NodeInfo},
+    coordinator_to_cli::{ControlRequestReply, NodeInfo, NodeStatus},
 };
 use eyre::{Context, bail};
 
@@ -107,28 +107,37 @@ fn list(
     let entries: Vec<OutputEntry> = filtered_nodes
         .into_iter()
         .map(|node| {
-            let (status, pid, cpu, memory) = if node.exited {
-                (
+            let (status, pid, cpu, memory) = match node.status {
+                NodeStatus::Running => {
+                    if let Some(ref metrics) = node.metrics {
+                        (
+                            "Running".to_string(),
+                            metrics.pid.to_string(),
+                            format!("{:.1}%", metrics.cpu_usage),
+                            format!("{:.0} MB", metrics.memory_mb),
+                        )
+                    } else {
+                        ("Running".to_string(), "-".to_string(), "-".to_string(), "-".to_string())
+                    }
+                }
+                NodeStatus::Exited => (
                     "Exited".to_string(),
                     "-".to_string(),
                     "-".to_string(),
                     "-".to_string(),
-                )
-            } else if let Some(metrics) = node.metrics {
-                (
-                    "Running".to_string(),
-                    metrics.pid.to_string(),
-                    format!("{:.1}%", metrics.cpu_usage),
-                    format!("{:.0} MB", metrics.memory_mb),
-                )
-            } else {
-                // Node exists but no metrics available (might be starting or error state)
-                (
+                ),
+                NodeStatus::Restarting => (
+                    "Restarting".to_string(),
+                    "-".to_string(),
+                    "-".to_string(),
+                    "-".to_string(),
+                ),
+                NodeStatus::Unknown => (
                     "Unknown".to_string(),
                     "-".to_string(),
                     "-".to_string(),
                     "-".to_string(),
-                )
+                ),
             };
 
             OutputEntry {

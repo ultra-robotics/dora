@@ -774,7 +774,9 @@ async fn start_inner(
                             ));
                         }
                         ControlRequest::GetNodeInfo => {
-                            use dora_message::coordinator_to_cli::{NodeInfo, NodeMetricsInfo};
+                            use dora_message::coordinator_to_cli::{
+                                NodeInfo, NodeMetricsInfo, NodeStatus,
+                            };
 
                             let mut node_infos = Vec::new();
                             for dataflow in running_dataflows.values() {
@@ -783,8 +785,15 @@ async fn start_inner(
                                     if let Some(daemon_id) = dataflow.node_to_daemon.get(node_id) {
                                         let exited = dataflow.exited_before_subscribe.contains(node_id)
                                             || dataflow.exited_nodes.contains(node_id);
+                                        let status = if exited {
+                                            NodeStatus::Exited
+                                        } else if dataflow.node_metrics.contains_key(node_id) {
+                                            NodeStatus::Running
+                                        } else {
+                                            NodeStatus::Unknown
+                                        };
                                         // Omit metrics for exited nodes (avoid stale data)
-                                        let metrics = if exited {
+                                        let metrics = if status == NodeStatus::Exited {
                                             None
                                         } else {
                                             dataflow.node_metrics.get(node_id).map(|m| {
@@ -808,7 +817,7 @@ async fn start_inner(
                                             dataflow_name: dataflow.name.clone(),
                                             node_id: node_id.clone(),
                                             daemon_id: daemon_id.clone(),
-                                            exited,
+                                            status,
                                             metrics,
                                         });
                                     }
