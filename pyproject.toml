@@ -1,0 +1,18 @@
+[project]
+name = "dora-test-test"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "dora-rs",
+    "numpy>=2.4.1",
+]
+
+[tool.uv.workspace]
+members = [
+    "apis/python/node",
+]
+
+[tool.uv.sources]
+dora-rs = { workspace = true, editable = true }

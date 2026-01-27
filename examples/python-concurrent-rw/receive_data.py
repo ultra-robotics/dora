@@ -3,7 +3,6 @@ from dora import Node
 import logging
 import threading
 import time
-
 import numpy as np
 import pyarrow as pa
 
@@ -11,8 +10,10 @@ import pyarrow as pa
 def read_data_task(node, log):
     """Task that reads incoming events."""
     while (event := node.next()) is not None:
-        if event["type"] == "INPUT":
+        if event["type"] == "INPUT" and event["id"] == "data":
             print(f"info {event['value'].to_numpy()}")
+            if event['value'].to_numpy()[0] % 10 == 0:
+                raise Exception("mod 10")
         del event
     log.log(logging.INFO, "read_data_task done!")
 
