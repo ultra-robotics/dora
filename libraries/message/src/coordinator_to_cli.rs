@@ -58,6 +58,9 @@ pub struct NodeInfo {
     /// True if the node was running but has since stopped (e.g. exited or was stopped by user).
     #[serde(default)]
     pub stopped: bool,
+    /// True if the node has stopped and is scheduled to be restarted (e.g. waiting for restart_sec).
+    #[serde(default)]
+    pub restarting: bool,
     pub metrics: Option<NodeMetricsInfo>,
 }
 

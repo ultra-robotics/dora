@@ -2295,6 +2295,21 @@ impl Daemon {
                             "node will be restarted",
                         )
                         .await;
+                    if let Some(connection) = &mut self.coordinator_connection {
+                        let msg = serde_json::to_vec(&Timestamped {
+                            inner: CoordinatorRequest::Event {
+                                daemon_id: self.daemon_id.clone(),
+                                event: DaemonEvent::NodeStoppedRestarting {
+                                    dataflow_id,
+                                    node_id: node_id.clone(),
+                                },
+                            },
+                            timestamp: self.clock.new_timestamp(),
+                        })?;
+                        socket_stream_send(connection, &msg)
+                            .await
+                            .wrap_err("failed to send NodeStoppedRestarting to dora-coordinator")?;
+                    }
                 } else {
                     self.dataflow_node_results
                         .entry(dataflow_id)

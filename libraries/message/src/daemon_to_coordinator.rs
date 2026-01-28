@@ -71,6 +71,11 @@ pub enum DaemonEvent {
         dataflow_id: DataflowId,
         metrics: BTreeMap<NodeId, NodeMetrics>,
     },
+    /// A node has stopped and will be restarted (after restart_sec delay).
+    NodeStoppedRestarting {
+        dataflow_id: DataflowId,
+        node_id: NodeId,
+    },
 }
 
 /// Resource metrics for a node process

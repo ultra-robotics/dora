@@ -32,6 +32,7 @@ use std::{
         atomic::{self, AtomicBool, AtomicU32},
     },
 };
+use std::time::Duration;
 use tokio::{
     fs::File,
     io::{AsyncBufReadExt, AsyncWriteExt},
@@ -99,6 +100,13 @@ impl PreparedNode {
         }
     }
 
+    fn restart_sec(&self) -> u64 {
+        match &self.node.kind {
+            dora_core::descriptor::CoreNodeKind::Custom(n) => n.restart_sec.unwrap_or(0),
+            dora_core::descriptor::CoreNodeKind::Runtime(_) => 0,
+        }
+    }
+
     async fn restart_loop(
         self,
         mut logger: NodeLogger<'static>,
@@ -163,6 +171,17 @@ impl PreparedNode {
             let _ = self.daemon_tx.clone().send(event).await;
 
             if restart {
+                let restart_sec = self.restart_sec();
+                if restart_sec > 0 {
+                    logger
+                        .log(
+                            LogLevel::Info,
+                            Some("daemon".into()),
+                            format!("waiting {restart_sec}s before restarting node"),
+                        )
+                        .await;
+                    tokio::time::sleep(Duration::from_secs(restart_sec)).await;
+                }
                 if success {
                     logger
                         .log(

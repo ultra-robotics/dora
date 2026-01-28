@@ -108,8 +108,13 @@ fn list(
         .into_iter()
         .map(|node| {
             let (status, pid, cpu, memory) = if node.stopped {
+                let status = if node.restarting {
+                    "Stopped (Restarting)".to_string()
+                } else {
+                    "Stopped".to_string()
+                };
                 (
-                    "Stopped".to_string(),
+                    status,
                     "-".to_string(),
                     "-".to_string(),
                     "-".to_string(),

@@ -799,12 +799,14 @@ async fn start_inner(
 
                                         let stopped = dataflow.node_had_metrics.contains(node_id)
                                             && !dataflow.node_metrics.contains_key(node_id);
+                                        let restarting = dataflow.node_restarting.contains(node_id);
                                         node_infos.push(NodeInfo {
                                             dataflow_id: dataflow.uuid,
                                             dataflow_name: dataflow.name.clone(),
                                             node_id: node_id.clone(),
                                             daemon_id: daemon_id.clone(),
                                             stopped,
+                                            restarting,
                                             metrics,
                                         });
                                     }
@@ -944,9 +946,18 @@ async fn start_inner(
                         }
                     }
                     for (node_id, node_metrics) in metrics {
+                        dataflow.node_restarting.remove(&node_id);
                         dataflow.node_had_metrics.insert(node_id.clone());
                         dataflow.node_metrics.insert(node_id, node_metrics);
                     }
+                }
+            }
+            Event::NodeStoppedRestarting {
+                dataflow_id,
+                node_id,
+            } => {
+                if let Some(dataflow) = running_dataflows.get_mut(&dataflow_id) {
+                    dataflow.node_restarting.insert(node_id);
                 }
             }
             Event::DataflowBuildResult {
@@ -1133,6 +1144,8 @@ struct RunningDataflow {
     node_metrics: BTreeMap<NodeId, dora_message::daemon_to_coordinator::NodeMetrics>,
     /// Nodes that have had metrics at least once (used to distinguish stopped from not-yet-started)
     node_had_metrics: BTreeSet<NodeId>,
+    /// Nodes that have stopped and are scheduled for restart (show "Stopped (Restarting)")
+    node_restarting: BTreeSet<NodeId>,
 
     spawn_result: CachedResult,
     stop_reply_senders: Vec<tokio::sync::oneshot::Sender<eyre::Result<ControlRequestReply>>>,
@@ -1551,6 +1564,7 @@ async fn start_dataflow(
         node_to_daemon,
         node_metrics: BTreeMap::new(),
         node_had_metrics: BTreeSet::new(),
+        node_restarting: BTreeSet::new(),
         spawn_result: CachedResult::default(),
         stop_reply_senders: Vec::new(),
         buffered_log_messages: Vec::new(),
@@ -1645,6 +1659,10 @@ pub enum Event {
         daemon_id: DaemonId,
         metrics: BTreeMap<NodeId, dora_message::daemon_to_coordinator::NodeMetrics>,
     },
+    NodeStoppedRestarting {
+        dataflow_id: uuid::Uuid,
+        node_id: NodeId,
+    },
 }
 
 impl Event {
@@ -1672,6 +1690,7 @@ impl Event {
             Event::DataflowBuildResult { .. } => "DataflowBuildResult",
             Event::DataflowSpawnResult { .. } => "DataflowSpawnResult",
             Event::NodeMetrics { .. } => "NodeMetrics",
+            Event::NodeStoppedRestarting { .. } => "NodeStoppedRestarting",
         }
     }
 }

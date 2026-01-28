@@ -486,6 +486,11 @@ pub struct Node {
     #[serde(default)]
     pub restart_policy: RestartPolicy,
 
+    /// Seconds to wait before restarting a node that has stopped (when restart policy allows restart).
+    /// Defaults to 0 (restart immediately).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart_sec: Option<u64>,
+
     /// Unstable machine deployment configuration
     #[schemars(skip)]
     #[serde(rename = "_unstable_deploy")]
@@ -671,6 +676,11 @@ pub struct CustomNode {
 
     #[serde(default)]
     pub restart_policy: RestartPolicy,
+
+    /// Seconds to wait before restarting the node when it stops (when restart policy allows restart).
+    /// Defaults to 0 (restart immediately).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub restart_sec: Option<u64>,
 
     #[serde(flatten)]
     pub run_config: NodeRunConfig,
