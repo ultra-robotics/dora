@@ -797,11 +797,14 @@ async fn start_inner(
                                             }
                                         });
 
+                                        let stopped = dataflow.node_had_metrics.contains(node_id)
+                                            && !dataflow.node_metrics.contains_key(node_id);
                                         node_infos.push(NodeInfo {
                                             dataflow_id: dataflow.uuid,
                                             dataflow_name: dataflow.name.clone(),
                                             node_id: node_id.clone(),
                                             daemon_id: daemon_id.clone(),
+                                            stopped,
                                             metrics,
                                         });
                                     }
@@ -924,11 +927,24 @@ async fn start_inner(
             }
             Event::NodeMetrics {
                 dataflow_id,
+                daemon_id,
                 metrics,
             } => {
-                // Store metrics for this dataflow
+                // Store metrics for this dataflow; remove metrics for nodes on this daemon that are no longer running
                 if let Some(dataflow) = running_dataflows.get_mut(&dataflow_id) {
+                    let nodes_on_daemon: Vec<_> = dataflow
+                        .node_to_daemon
+                        .iter()
+                        .filter(|(_, d)| *d == &daemon_id)
+                        .map(|(node_id, _)| node_id.clone())
+                        .collect();
+                    for node_id in nodes_on_daemon {
+                        if !metrics.contains_key(&node_id) {
+                            dataflow.node_metrics.remove(&node_id);
+                        }
+                    }
                     for (node_id, node_metrics) in metrics {
+                        dataflow.node_had_metrics.insert(node_id.clone());
                         dataflow.node_metrics.insert(node_id, node_metrics);
                     }
                 }
@@ -1115,6 +1131,8 @@ struct RunningDataflow {
     node_to_daemon: BTreeMap<NodeId, DaemonId>,
     /// Latest metrics for each node (from daemons)
     node_metrics: BTreeMap<NodeId, dora_message::daemon_to_coordinator::NodeMetrics>,
+    /// Nodes that have had metrics at least once (used to distinguish stopped from not-yet-started)
+    node_had_metrics: BTreeSet<NodeId>,
 
     spawn_result: CachedResult,
     stop_reply_senders: Vec<tokio::sync::oneshot::Sender<eyre::Result<ControlRequestReply>>>,
@@ -1532,6 +1550,7 @@ async fn start_dataflow(
         nodes,
         node_to_daemon,
         node_metrics: BTreeMap::new(),
+        node_had_metrics: BTreeSet::new(),
         spawn_result: CachedResult::default(),
         stop_reply_senders: Vec::new(),
         buffered_log_messages: Vec::new(),
@@ -1623,6 +1642,7 @@ pub enum Event {
     },
     NodeMetrics {
         dataflow_id: uuid::Uuid,
+        daemon_id: DaemonId,
         metrics: BTreeMap<NodeId, dora_message::daemon_to_coordinator::NodeMetrics>,
     },
 }

@@ -107,7 +107,14 @@ fn list(
     let entries: Vec<OutputEntry> = filtered_nodes
         .into_iter()
         .map(|node| {
-            let (status, pid, cpu, memory) = if let Some(metrics) = node.metrics {
+            let (status, pid, cpu, memory) = if node.stopped {
+                (
+                    "Stopped".to_string(),
+                    "-".to_string(),
+                    "-".to_string(),
+                    "-".to_string(),
+                )
+            } else if let Some(metrics) = node.metrics {
                 (
                     "Running".to_string(),
                     metrics.pid.to_string(),
@@ -115,7 +122,7 @@ fn list(
                     format!("{:.0} MB", metrics.memory_mb),
                 )
             } else {
-                // Node exists but no metrics available (might be starting or error state)
+                // Node exists but no metrics available (might be starting)
                 (
                     "Unknown".to_string(),
                     "-".to_string(),

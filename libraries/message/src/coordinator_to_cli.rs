@@ -55,6 +55,9 @@ pub struct NodeInfo {
     pub dataflow_name: Option<String>,
     pub node_id: NodeId,
     pub daemon_id: DaemonId,
+    /// True if the node was running but has since stopped (e.g. exited or was stopped by user).
+    #[serde(default)]
+    pub stopped: bool,
     pub metrics: Option<NodeMetricsInfo>,
 }
 

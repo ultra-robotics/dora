@@ -123,6 +123,7 @@ pub async fn handle_connection(
                 } => {
                     let event = Event::NodeMetrics {
                         dataflow_id,
+                        daemon_id,
                         metrics,
                     };
                     if events_tx.send(event).await.is_err() {
